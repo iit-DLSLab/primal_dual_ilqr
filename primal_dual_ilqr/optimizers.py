@@ -1,10 +1,10 @@
 from jax import debug, grad, jit, lax, scipy, vmap
-
+import jax
 import jax.numpy as np
 
 from functools import partial
 
-from trajax.optimizers import evaluate, linearize, quadratize
+from trajax.optimizers import evaluate, linearize, quadratize,vectorize
 
 from .kkt_helpers import compute_search_direction_kkt, tvlqr_kkt
 
@@ -16,7 +16,23 @@ from .linalg_helpers import (
 )
 
 from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu
+import time
 
+def quadratizeGN(fun, argnums=3):
+
+    J_x = jax.jacobian(fun)
+    J_u = jax.jacobian(fun, argnums=1)
+
+    @jit
+    def quadratizer(*args):
+        
+        H_xx = np.outer(J_x(*args),J_x(*args)) + 6e-1 * np.eye(J_x(*args).shape[-1])
+        H_uu = np.outer(J_u(*args),J_u(*args)) + 6e-1 * np.eye(J_u(*args).shape[-1])
+        H_xu = np.outer(J_x(*args),J_u(*args))
+        
+        return H_xx, H_uu, H_xu
+
+    return vectorize(quadratizer, argnums)
 
 def lagrangian(cost, dynamics, x0):
     """Returns a function to evaluate the associated Lagrangian."""
@@ -29,6 +45,15 @@ def lagrangian(cost, dynamics, x0):
 
     return fun
 
+def lagrangianNoDyn(cost, x0):
+    """Returns a function to evaluate the associated Lagrangian."""
+
+    def fun(x, u, t, v, v_prev):
+        c1 = cost(x, u, t)
+        c3 = np.dot(v_prev, lax.select(t == 0, x0 - x, -x))
+        return c1 + c3
+
+    return fun
 
 @jit
 def regularize(Q, R, M, make_psd, psd_delta):
@@ -98,13 +123,16 @@ def compute_search_direction(
 
     pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
 
-    quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
+    # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
+    quadratizer = quadratize(lagrangianNoDyn(cost, x0), argnums=5)
+    # quadratizer = quadratizeGN(cost, argnums=3)
     Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
 
     R = R_pad[:-1]
     M = M_pad[:-1]
 
-    Q, R = regularize(Q, R, M, make_psd, psd_delta)
+    # Q, R = regularize(Q, R, M, make_psd, psd_delta)
 
     linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
@@ -115,13 +143,12 @@ def compute_search_direction(
     A = A_pad[:-1]
     B = B_pad[:-1]
 
-    K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
-    # K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
-    dX, dU = rollout(K, k, c[0], A, B, c[1:])
-    # dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
-    dV = dual_lqr(dX, P, p)
+    # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
+    K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+    dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
+    # dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
-    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+    dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
 
     # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
 
@@ -252,7 +279,7 @@ def line_search(
 
 
 @partial(jit, static_argnums=(0, 1))
-def model_evaluator_helper(cost, dynamics, x0, X, U):
+def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
     """Evaluates the costs and constraints based on the provided primal variables.
 
     Args:
@@ -281,6 +308,8 @@ def model_evaluator_helper(cost, dynamics, x0, X, U):
 def primal_dual_ilqr(
     cost,
     dynamics,
+    reference,
+    parameter,
     x0,
     X_in,
     U_in,
@@ -325,7 +354,10 @@ def primal_dual_ilqr(
       final_constraints: the constraints at the optimal state and control trajectory.
       no_errors:         whether no errors were encountered during the solve.
     """
-    model_evaluator = partial(model_evaluator_helper, cost, dynamics, x0)
+    _cost = partial(cost,reference=reference)
+    _dynamics = partial(dynamics,parameter=parameter)
+
+    model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
 
     @jit
     def merit_function(V, g, c, rho):
@@ -345,8 +377,8 @@ def primal_dual_ilqr(
         # )
 
         dX, dU, dV, q, r = compute_search_direction(
-            cost,
-            dynamics,
+            _cost,
+            _dynamics,
             x0,
             X,
             U,
@@ -415,6 +447,11 @@ def primal_dual_ilqr(
             merit_new,
             merit_slope_new,
         ) = direction_and_merit(X_new, U_new, V_new, g_new, c_new)
+        # jax.debug.print(f"{merit_new=}, {merit_slope_new=}")
+        # jax.debug.print(f"{rho_new=}")
+        # jax.debug.print(f"{dX_new=}")
+        # jax.debug.print(f"{dU_new=}")
+        # jax.debug.print(f"{dV_new=}")
 
         return (
             X_new,
