@@ -97,8 +97,6 @@ def compute_search_direction(
     U,
     V,
     c,
-    make_psd,
-    psd_delta,
 ):
     """Computes the SQP search direction.
 
@@ -303,6 +301,32 @@ def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
 
     return g, c
 
+@partial(jit, static_argnums=(0, 1))
+def mpc(
+    cost,
+    dynamics,
+    reference,
+    parameter,
+    x0,
+    X_in,
+    U_in,
+    V_in,):
+
+    _cost = partial(cost,reference=reference)
+    _dynamics = partial(dynamics,parameter=parameter)
+    model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
+    g, c = model_evaluator(X_in, U_in)
+    dX,dU, dV, q, r = compute_search_direction(
+            _cost,
+            _dynamics,
+            x0,
+            X_in,
+            U_in,
+            V_in,
+            c,
+        )
+
+    return X_in + dX, U_in+dU, V_in + dV, g, c
 
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(
@@ -384,8 +408,6 @@ def primal_dual_ilqr(
             U,
             V,
             c,
-            make_psd,
-            psd_delta,
         )
 
         rho = merit_rho(c, dV)
@@ -509,4 +531,4 @@ def primal_dual_ilqr(
 
     no_errors = np.logical_and(no_errors, iteration < max_iterations)
 
-    return X, U, V, iteration, g, c, no_errors
+    return X, U, V, g, c

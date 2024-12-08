@@ -251,9 +251,9 @@ grf_ref = jnp.zeros(3 * n_contact)
 
 u_ref = grf_ref
 
-Qp = jnp.diag(jnp.array([1, 1, 1000]))
+Qp = jnp.diag(jnp.array([0, 0, 1000]))
 Qq = jnp.diag(jnp.ones(n_joints)) * 1e2
-Qdp = jnp.diag(jnp.array([10, 10, 10]))
+Qdp = jnp.diag(jnp.array([100, 100, 100]))
 Qomega = jnp.diag(jnp.array([10, 10, 10]))
 Qdq = jnp.diag(jnp.ones(n_joints)) * 1e-2
 Rgrf = jnp.diag(jnp.ones(3 * n_contact)) * 1e-3
@@ -278,7 +278,7 @@ def cost(x, u, t, reference):
     # grf_ref = reference[t,12:24]
 
     stage_cost = (p - p_ref).T @ Qp @ (p - p_ref) + (rpy-rpy_ref).T@Qrpy@(rpy-rpy_ref) + (dp-dp_ref).T @ Qdp @ (dp-dp_ref) + (omega-omega_ref).T @ Qomega @ (omega-omega_ref) + (grf-grf_ref).T @ Rgrf @ (grf-grf_ref) #+ dq.T @ Rgrf @ dq + (q - q_ref).T @ Qq @ (q - q_ref)
-    term_cost = (p - p_ref).T @ Qp @ (p - p_ref) + dp.T @ Qdp @ dp #+ omega.T @ Qomega @ omega + (q - q_ref).T @ Qq @ (q - q_ref)
+    term_cost = (p - p_ref).T @ Qp @ (p - p_ref) + (rpy-rpy_ref).T@Qrpy@(rpy-rpy_ref) + (dp-dp_ref).T @ Qdp @ (dp-dp_ref) + (omega-omega_ref).T @ Qomega @ (omega-omega_ref) #+ omega.T @ Qomega @ omega + (q - q_ref).T @ Qq @ (q - q_ref)
 
     return jnp.where(t == N, 0.5 * term_cost, 0.5 * stage_cost)
 
@@ -293,7 +293,7 @@ from timeit import default_timer as timer
 
 @jax.jit
 def work(reference,parameter,x0,X0,U0,V0):
-    return optimizers.primal_dual_ilqr(
+    return optimizers.mpc(
         cost,
         dynamics,
         reference,
@@ -302,8 +302,6 @@ def work(reference,parameter,x0,X0,U0,V0):
         X0,
         U0,
         V0,
-        max_iterations=1,
-        psd_delta=1e-3,
     )
 
 # Vectorize the work function to solve multiple instances in parallel
@@ -319,11 +317,13 @@ def work(reference,parameter,x0,X0,U0,V0):
 # U0_batch = jnp.tile(U0, (batch_size, 1, 1))
 # X_batch, U_batch, V_batch, num_iterations_batch, g_batch, c_batch, no_errors_batch = work_vmap_jit(x0_batch, X0_batch, U0_batch)
 # Solve in parallel
-X,U,V,num_iterations, g, c,no_errors =  work(reference,parameter,x0,X0,U0,V0)
+X,U,V, g, c =  work(reference,parameter,x0,X0,U0,V0)
+ 
 start = timer()
 # jax.profiler.start_trace("/tmp/tensorboar d")
 for i in range(100):
-    X,U,V,num_iterations, g, c,no_errors =  work(reference,parameter,x0,X0,U0,V0)
+    X,U,V, g, c =  work(reference,parameter,x0,X0,U0,V0)
+end = timer()
 # jax.profiler.start_trace("/tmp/tensorboard")
 # X,U,V,num_iterations, g, c,no_errors =  work(reference,parameter,x0,X0,U0,V0)
 # jax.profiler.stop_trace()
@@ -467,10 +467,10 @@ while True:
         input['des_speeds'] = np.array([ref_base_lin_vel[0],ref_base_lin_vel[1],ref_base_lin_vel[2]])
         input['des_height'] = 0.36
 
-        parameter, ref, terrain_height, foot_ref_dot = refGenerator(timer_class = t,initial_state = init,input = input,param=param, terrain_height=terrain_height)
+        parameter, _, terrain_height, foot_ref_dot = refGenerator(timer_class = t,initial_state = init,input = input,param=param, terrain_height=terrain_height)
         start = timer()
         reference = jnp.tile(jnp.concatenate([p_ref, rpy_ref, ref_base_lin_vel, ref_base_ang_vel]), (N + 1, 1))
-        X,U,V,_,_, _,_ =  work(reference,parameter,x0,X0,U0,V0)
+        X,U,V, _,_ =  work(reference,parameter,x0,X0,U0,V0)
         stop = timer()
         print(f"Execution time: {stop-start}")
         U0 = U
