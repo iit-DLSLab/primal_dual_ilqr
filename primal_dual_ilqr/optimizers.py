@@ -130,7 +130,7 @@ def compute_search_direction(
     R = R_pad[:-1]
     M = M_pad[:-1]
 
-    # Q, R = regularize(Q, R, M, make_psd, psd_delta)
+    Q, R = regularize(Q, R, M, True, 1e-6)
 
     linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
