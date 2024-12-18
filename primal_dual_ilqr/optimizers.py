@@ -143,12 +143,13 @@ def compute_search_direction(
     A = A_pad[:-1]
     B = B_pad[:-1]
 
+    alpha = 1
     # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
     K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
-    dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
-    # dV = dual_lqr(dX, P, p)
+    dX, dU = rollout_gpu(K, alpha*k, c[0], A, B, c[1:])
+    dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
-    dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
 
     # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
 
@@ -161,7 +162,98 @@ def compute_search_direction(
 
     return dX, dU, dV, q, r
 
+@partial(jit, static_argnums=(0, 1))
+def compute_feasibility_driven_search_direction(
+    cost,
+    dynamics,
+    x0,
+    X,
+    U,
+    c,
+):
+    """Computes the SQP search direction.
 
+    Args:
+      cost:          cost function with signature cost(x, u, t).
+      dynamics:      dynamics function with signature dynamics(x, u, t).
+      x0:            [n]           numpy array.
+      X:             [T+1, n]      numpy array.
+      U:             [T, m]        numpy array.
+      V:             [T+1, n]      numpy array.
+      c:             [T+1, n]      numpy array.
+      make_psd:      whether to zero negative eigenvalues after quadratization.
+      psd_delta:     the minimum eigenvalue post PSD cone projection.
+
+    Returns:
+      dX: [T+1, n] numpy array.
+      dU: [T, m]   numpy array.
+      q: [T+1, n]  numpy array.
+      r: [T, m]    numpy array.
+    """
+    T = U.shape[0]
+
+    pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
+
+    # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
+    quadratizer = quadratize(lagrangianNoDyn(cost, x0), argnums=5)
+    # quadratizer = quadratizeGN(cost, argnums=3)
+    Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
+
+    R = R_pad[:-1]
+    M = M_pad[:-1]
+
+    # Q, R = regularize(Q, R, M, True, 1e-6)
+    Q = Q + 1e-3 * np.eye(Q.shape[-1])
+    R = R + 1e-3 * np.eye(R.shape[-1])
+
+    linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
+    q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    r = r_pad[:-1]
+
+    dynamics_linearizer = linearize(dynamics)
+    A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
+    A = A_pad[:-1]
+    B = B_pad[:-1]
+
+    # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
+    K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+    # dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
+    # dX,dU = rollout(K, k, c[0], A, B, c[1:])
+    alpha = 0.5
+    _ , n = c[1:].shape
+    def f(carry, elem):
+        t = elem
+
+        v_new = (1-alpha)*c[t]
+        x_new = X[t] + (1-alpha)*c[t]
+        u = U[t] + K[t] @ (x) + alpha*k[t]
+        v = V[t]*(1-alpha)
+        next_x = dynamics(x, u ,t)
+
+        new_carry = next_x
+        new_output = (next_x, u)
+
+        return new_carry, new_output
+
+    (X_rollout, dU) = lax.scan(f, x0, np.arange(T), T)[1]
+    
+    dX = np.concatenate([x0.reshape([1, n]), X_rollout])
+    
+    # dV = dual_lqr(dX, P, p)
+    # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
+    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+
+    # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
+
+    # candidate_sol = np.concatenate([dX.flatten(), dU.flatten(), dV.flatten()])
+    # candidate_sol = np.concatenate([new_dX.flatten(), new_dU.flatten(), new_dV.flatten()])
+    # error = LHS @ candidate_sol - rhs
+    # debug.print(f"error_norm={np.linalg.norm(error)}")
+
+    # return new_dX, new_dU, new_dV, q, r
+
+    return dX, dU, dV, q, r
 @jit
 def merit_rho(c, dV):
     """Determines the merit function penalty parameter to be used.
@@ -274,9 +366,71 @@ def line_search(
     # )
 
     no_errors = alpha > alpha_min
-
+    
+    jax.debug.print("Best alpha: {}", alpha)
     return X, U, V, new_g, new_c, no_errors
 
+def parallel_line_search(
+    merit_function,
+    model_evaluator,
+    X_in,
+    U_in,
+    V_in,
+    dX,
+    dU,
+    dV,
+    current_merit,
+    current_g,
+    current_c,
+    merit_slope,
+):
+    """Performs a primal-dual line search on an augmented Lagrangian merit function.
+
+    Args:
+      merit_function:  merit function mapping V, g, c to the merit scalar.
+      X_in:            [T+1, n]      numpy array.
+      U_in:            [T, m]        numpy array.
+      V_in:            [T+1, n]      numpy array.
+      dX:              [T+1, n]      numpy array.
+      dU:              [T, m]        numpy array.
+      dV:              [T+1, n]      numpy array.
+      current_merit:   the merit function value at X, U, V.
+      current_g:       the cost value at X, U, V.
+      current_c:       the constraint values at X, U, V.
+      merit_slope:     the directional derivative of the merit function.
+      armijo_factor:   the Armijo parameter to be used in the line search.
+      alpha_0:         initial line search value.
+      alpha_mult:      a constant in (0, 1) that gets multiplied to alpha to update it.
+      alpha_min:       minimum line search value.
+
+    Returns:
+      X: [T+1, n]     numpy array, representing the optimal state trajectory.
+      U: [T, m]       numpy array, representing the optimal control trajectory.
+      V: [T+1, n]     numpy array, representing the optimal multiplier trajectory.
+      new_g:          the cost value at the new X, U, V.
+      new_c:          the constraint values at the new X, U, V.
+      no_errors:       whether no error occurred during the line search.
+    """
+    armijo_factor=1e-4
+    def step_acceptance(merit,alpha):
+        return merit > current_merit + alpha * armijo_factor * merit_slope
+    alpha_values = np.exp2(-0.5*np.arange(11))
+    def body(alpha):
+        X_new = X_in + alpha * dX
+        U_new = U_in + alpha * dU
+        V_new = V_in + alpha * dV
+        new_g, new_c = model_evaluator(X_new, U_new)
+        new_merit = merit_function(V_new, new_g, new_c)
+        new_merit = np.where(np.isnan(new_merit), current_merit, new_merit)
+        return X_new, U_new, V_new, new_g, new_c, new_merit
+
+    X, U, V, new_g, new_c, new_merit = vmap(body)(alpha_values)
+    acceptance = vmap(step_acceptance)(new_merit,alpha_values)
+    best_index = lax.cond(np.any(acceptance), lambda _: np.argmax(acceptance), lambda _: -1, None)
+    jax.debug.print("acceptance: {}", acceptance)
+    jax.debug.print("Best index: {}", best_index)
+
+    return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index]
 
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
@@ -327,8 +481,42 @@ def mpc(
             V_in,
             c,
         )
+    
+    @jit
+    def merit_function(V, g, c, rho):
+        return g + np.sum((V + 0.5 * rho * c) * c)
+    
+    dV2 = np.sum(dV * dV)
+    c2 = np.sum(c * c)
+    rho  = 2.0 * np.sqrt(dV2 / c2)
+    jax.debug.print("rho: {}", rho)
+    merit = merit_function(V_in, g, c, rho)
 
-    return X_in + dX, U_in+dU, V_in + dV, g, c
+    merit_slope = slope(
+        dX,
+        dU,
+        dV,
+        c,
+        q,
+        r,
+        rho,
+    )
+
+    X_new, U_new, V_new, g_new, c_new = parallel_line_search(
+            partial(merit_function, rho=rho),
+            model_evaluator,
+            X_in,
+            U_in,
+            V_in,
+            dX,
+            dU,
+            dV,
+            merit,
+            g,
+            c,
+            merit_slope
+        )
+    return X_new, U_new, V_new, g_new, c_new
 
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(
@@ -413,7 +601,7 @@ def primal_dual_ilqr(
         )
 
         rho = merit_rho(c, dV)
-
+        jax.debug.print("rho: {}", rho)
         merit = merit_function(V, g, c, rho)
 
         merit_slope = slope(
