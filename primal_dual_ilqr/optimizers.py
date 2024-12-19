@@ -338,7 +338,7 @@ def line_search(
 
     def continuation_criterion(inputs):
         _, _, _, _, _, new_merit, alpha = inputs
-        # debug.print(f"{new_merit=}, {current_merit=}, {alpha=}, {merit_slope=}")
+        # debug.print(f"{new_merit=}, {current_merit=}, {alpha=}, {merit_slope=}")\
         return np.logical_and(
             new_merit > current_merit + alpha * armijo_factor * merit_slope,
             alpha > alpha_min,
@@ -355,19 +355,14 @@ def line_search(
         new_merit = np.where(np.isnan(new_merit), current_merit, new_merit)
         return X_new, U_new, V_new, new_g, new_c, new_merit, alpha
 
-    X, U, V, new_g, new_c, _, alpha = lax.while_loop(
+    X, U, V, new_g, new_c, new_merit, alpha = lax.while_loop(
         continuation_criterion,
         body,
         (X_in, U_in, V_in, current_g, current_c, np.inf, alpha_0 / alpha_mult),
     )
-
-    # debug.print(
-    #     f"{new_g=}, c_sq_norm={np.sum(new_c * new_c)}, {merit_slope=}, {alpha=}"
-    # )
-
     no_errors = alpha > alpha_min
     
-    jax.debug.print("Best alpha: {}", alpha)
+    
     return X, U, V, new_g, new_c, no_errors
 
 def parallel_line_search(
@@ -383,8 +378,9 @@ def parallel_line_search(
     current_g,
     current_c,
     merit_slope,
+    armijo_factor,
 ):
-    """Performs a primal-dual line search on an augmented Lagrangian merit function.
+    """Performs a primal-dual line search on an augmented Lagrangian merit function in parralel fixing the number of steps.
 
     Args:
       merit_function:  merit function mapping V, g, c to the merit scalar.
@@ -411,10 +407,9 @@ def parallel_line_search(
       new_c:          the constraint values at the new X, U, V.
       no_errors:       whether no error occurred during the line search.
     """
-    armijo_factor=1e-4
     def step_acceptance(merit,alpha):
         return merit > current_merit + alpha * armijo_factor * merit_slope
-    alpha_values = np.exp2(-0.5*np.arange(11))
+    alpha_values = np.exp2(-np.arange(11))
     def body(alpha):
         X_new = X_in + alpha * dX
         U_new = U_in + alpha * dU
@@ -426,10 +421,7 @@ def parallel_line_search(
 
     X, U, V, new_g, new_c, new_merit = vmap(body)(alpha_values)
     acceptance = vmap(step_acceptance)(new_merit,alpha_values)
-    best_index = lax.cond(np.any(acceptance), lambda _: np.argmax(acceptance), lambda _: -1, None)
-    jax.debug.print("acceptance: {}", acceptance)
-    jax.debug.print("Best index: {}", best_index)
-
+    best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
     return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index]
 
 @partial(jit, static_argnums=(0, 1))
@@ -489,7 +481,6 @@ def mpc(
     dV2 = np.sum(dV * dV)
     c2 = np.sum(c * c)
     rho  = 2.0 * np.sqrt(dV2 / c2)
-    jax.debug.print("rho: {}", rho)
     merit = merit_function(V_in, g, c, rho)
 
     merit_slope = slope(
@@ -501,7 +492,6 @@ def mpc(
         r,
         rho,
     )
-
     X_new, U_new, V_new, g_new, c_new = parallel_line_search(
             partial(merit_function, rho=rho),
             model_evaluator,
@@ -514,7 +504,8 @@ def mpc(
             merit,
             g,
             c,
-            merit_slope
+            merit_slope,
+            armijo_factor=1e-4,
         )
     return X_new, U_new, V_new, g_new, c_new
 
@@ -528,7 +519,7 @@ def primal_dual_ilqr(
     X_in,
     U_in,
     V_in,
-    max_iterations=100,
+    max_iterations=1,
     slope_threshold=1e-4,
     var_threshold=0.0,
     c_sq_threshold=1e-4,
@@ -601,7 +592,6 @@ def primal_dual_ilqr(
         )
 
         rho = merit_rho(c, dV)
-        jax.debug.print("rho: {}", rho)
         merit = merit_function(V, g, c, rho)
 
         merit_slope = slope(
