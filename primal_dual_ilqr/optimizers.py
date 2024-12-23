@@ -143,10 +143,9 @@ def compute_search_direction(
     A = A_pad[:-1]
     B = B_pad[:-1]
 
-    alpha = 1
     # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
     K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
-    dX, dU = rollout_gpu(K, alpha*k, c[0], A, B, c[1:])
+    dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
     dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
     # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
