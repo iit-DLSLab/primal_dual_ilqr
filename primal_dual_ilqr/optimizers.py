@@ -26,8 +26,8 @@ def quadratizeGN(fun, argnums=3):
     @jit
     def quadratizer(*args):
         
-        H_xx = np.outer(J_x(*args),J_x(*args)) + 6e-1 * np.eye(J_x(*args).shape[-1])
-        H_uu = np.outer(J_u(*args),J_u(*args)) + 6e-1 * np.eye(J_u(*args).shape[-1])
+        H_xx = np.outer(J_x(*args),J_x(*args)) #+ 6e-1 * np.eye(J_x(*args).shape[-1])
+        H_uu = np.outer(J_u(*args),J_u(*args)) #+ 6e-1 * np.eye(J_u(*args).shape[-1])
         H_xu = np.outer(J_x(*args),J_u(*args))
         
         return H_xx, H_uu, H_xu
@@ -132,9 +132,9 @@ def compute_search_direction(
     R = R_pad[:-1]
     M = M_pad[:-1]
 
-    # Q, R = regularize(Q, R, M, True, 1e-6)
-    Q = Q + mu * np.eye(Q.shape[-1])
-    R = R + mu * np.eye(R.shape[-1])
+    Q, R = regularize(Q, R, M, True, 1e-6)
+    # Q = Q + mu * np.eye(Q.shape[-1])
+    # R = R + mu * np.eye(R.shape[-1])
 
     linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
@@ -331,7 +331,7 @@ def parallel_line_search(
     X, U, V, new_g, new_c, new_merit = vmap(body)(alpha_values)
     acceptance = vmap(step_acceptance)(new_merit,alpha_values)
     best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
-    mu = np.where(np.any(acceptance),mu_in * 5, mu_in / 5)
+    mu = np.where(np.any(acceptance),mu_in * 10, mu_in / 10)
     mu = np.where(mu < 1e-16,1e-16,mu)
     return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index],mu
 
