@@ -4,8 +4,11 @@ from jax import jit, lax, scipy, vmap
 
 from .linalg_helpers import solve_symmetric_positive_definite_system
 
+from functools import partial
 
-def lqr_step(P, p, Q, q, R, r, M, A, B, c):
+import jax
+
+def lqr_step(P, p, Q, q, R, r, M, A, B, c,mu):
     """Single LQR Step.
 
     Args:
@@ -25,32 +28,32 @@ def lqr_step(P, p, Q, q, R, r, M, A, B, c):
       P, p: updated matrices encoding quadratic value function.
     """
     symmetrize = lambda x: 0.5 * (x + x.T)
-
-    AtP = A.T @ P
-    AtPA = symmetrize(AtP @ A)
-    BtP = B.T @ P
+    R = R + mu * np.eye(R.shape[0])
+    AtP = A.T @ (P + mu * np.eye(P.shape[0]))
+    AtPA = AtP @ A
+    BtP = B.T @ (P + mu * np.eye(P.shape[0]))
     BtPA = BtP @ A
 
     H = BtPA + M.T
     h = B.T @ p + BtP @ c + r
 
-    G = symmetrize(R + BtP @ B)
+    G = R + BtP @ B
 
-    K_k = solve_symmetric_positive_definite_system(
-        G, -np.hstack((H, h.reshape([-1, 1])))
-    )
-
+    # K_k = solve_symmetric_positive_definite_system(
+    #     G, -np.hstack((H, h.reshape([-1, 1])))
+    # )
+    K_k = np.linalg.solve(G, -np.hstack((H, h.reshape([-1, 1]))))
     K = K_k[:, :-1]
     k = K_k[:, -1]
 
-    P = symmetrize(Q + AtPA + K.T @ H)
+    P = Q + AtPA + K.T @ H
     p = q + A.T @ p + AtP @ c + K.T @ h
 
     return K, k, P, p
 
 
 @jit
-def tvlqr(Q, q, R, r, M, A, B, c):
+def tvlqr(Q, q, R, r, M, A, B, c,mu):
     """Discrete-time Finite Horizon Time-varying LQR.
 
     Args:
@@ -72,12 +75,11 @@ def tvlqr(Q, q, R, r, M, A, B, c):
 
     T = Q.shape[0] - 1
     n = Q.shape[1]
-
     def f(carry, elem):
         P, p = carry
         t = elem
 
-        K, k, P, p = lqr_step(P, p, Q[t], q[t], R[t], r[t], M[t], A[t], B[t], c[t])
+        K, k, P, p = lqr_step(P, p, Q[t], q[t], R[t], r[t], M[t], A[t], B[t], c[t],mu)
 
         new_carry = (P, p)
         new_output = (K, k, P, p)
@@ -257,6 +259,28 @@ def rollout(K, k, x0, A, B, c):
 
     return (np.concatenate([x0.reshape([1, n]), X]), U)
 
+@partial(jit, static_argnums=(0))
+def non_linear_rollout(dynamics,x0,K,k,U):
+    """Rolls-out time-varying linear policy u[t] = K[t] x[t] + k[t]."""
+
+    T = k.shape[0]
+    n = x0.shape[0]
+
+    def f(carry, elem):
+        t = elem
+
+        x = carry
+        u = K[t] @ x + k[t] + U[t]
+        next_x = dynamics(x,u,t)
+
+        new_carry = next_x
+        new_output = (next_x, u)
+
+        return new_carry, new_output
+
+    (X, U) = lax.scan(f, x0, np.arange(T), T)[1]
+
+    return (np.concatenate([x0.reshape([1, n]), X]), U)
 
 @jit
 def rollout_gpu(K, k, x0, A, B, c):

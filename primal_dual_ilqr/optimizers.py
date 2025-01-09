@@ -15,7 +15,7 @@ from .linalg_helpers import (
     project_psd_cone,
 )
 
-from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu
+from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout
 import time
 
 def quadratizeGN(fun, argnums=3):
@@ -25,11 +25,11 @@ def quadratizeGN(fun, argnums=3):
 
     @jit
     def quadratizer(*args):
-        
+
         H_xx = np.outer(J_x(*args),J_x(*args)) #+ 6e-1 * np.eye(J_x(*args).shape[-1])
         H_uu = np.outer(J_u(*args),J_u(*args)) #+ 6e-1 * np.eye(J_u(*args).shape[-1])
         H_xu = np.outer(J_x(*args),J_u(*args))
-        
+
         return H_xx, H_uu, H_xu
 
     return vectorize(quadratizer, argnums)
@@ -74,16 +74,16 @@ def regularize(Q, R, M, make_psd, psd_delta):
     psd = vmap(partial(project_psd_cone, delta=psd_delta))
 
     # This is done to ensure that the R are positive definite.
-    R = lax.cond(make_psd, psd, lambda x: x, R)
+    # R = lax.cond(make_psd, psd, lambda x: x, R)
 
     # This is done to ensure that the Q - M R^(-1) M^T are positive semi-definite.
-    Rinv = vmap(lambda t: invert_symmetric_positive_definite_matrix(R[t]))(np.arange(T))
-    MRinvMT = vmap(lambda t: M[t] @ Rinv[t] @ M[t].T)(np.arange(T))
-    QMRinvMT = vmap(lambda t: Q[t] - MRinvMT[t])(np.arange(T))
-    QMRinvMT = lax.cond(make_psd, psd, lambda x: x, QMRinvMT)
-    Q_T = Q[T].reshape([1, n, n])
-    Q_T = lax.cond(make_psd, psd, lambda x: x, Q_T)
-    Q = np.concatenate([QMRinvMT + MRinvMT, Q_T])
+    # Rinv = vmap(lambda t: invert_symmetric_positive_definite_matrix(R[t]))(np.arange(T))
+    # MRinvMT = vmap(lambda t: M[t] @ Rinv[t] @ M[t].T)(np.arange(T))
+    # QMRinvMT = vmap(lambda t: Q[t] - MRinvMT[t])(np.arange(T))
+    # QMRinvMT = lax.cond(make_psd, psd, lambda x: x, QMRinvMT)
+    # Q_T = Q[T].reshape([1, n, n])
+    # Q_T = lax.cond(make_psd, psd, lambda x: x, Q_T)
+    Q = psd(Q)
 
     return Q, R
 
@@ -97,8 +97,6 @@ def compute_search_direction(
     U,
     V,
     c,
-    g,
-    mu,
 ):
     """Computes the SQP search direction.
 
@@ -124,17 +122,19 @@ def compute_search_direction(
     pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
 
     # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
-    quadratizer = quadratize(lagrangianNoDyn(cost, x0), argnums=5)
+    quadratizer = quadratize(cost)
     # quadratizer = quadratizeGN(cost, argnums=3)
-    Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
     # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
 
     R = R_pad[:-1]
     M = M_pad[:-1]
 
-    Q, R = regularize(Q, R, M, True, 1e-6)
-    # Q = Q + mu * np.eye(Q.shape[-1])
-    # R = R + mu * np.eye(R.shape[-1])
+
+    # Q, R = regularize(Q, R, M, True, 1e-6)
+    Q = Q + 1e-6 * np.eye(Q.shape[-1])
+    # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
+    R = R + 1e-6 * np.eye(R.shape[-1])
 
     linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
@@ -147,6 +147,7 @@ def compute_search_direction(
 
     # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
     K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+
     dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
     dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
@@ -269,10 +270,11 @@ def line_search(
         (X_in, U_in, V_in, current_g, current_c, np.inf, alpha_0 / alpha_mult),
     )
     no_errors = alpha > alpha_min
-    
-    
+
+
     return X, U, V, new_g, new_c, no_errors
 
+@partial(jit, static_argnums=(0, 1))
 def parallel_line_search(
     merit_function,
     model_evaluator,
@@ -287,7 +289,7 @@ def parallel_line_search(
     current_c,
     merit_slope,
     armijo_factor,
-    mu_in,
+    
 ):
     """Performs a primal-dual line search on an augmented Lagrangian merit function in parralel fixing the number of steps.
 
@@ -331,9 +333,7 @@ def parallel_line_search(
     X, U, V, new_g, new_c, new_merit = vmap(body)(alpha_values)
     acceptance = vmap(step_acceptance)(new_merit,alpha_values)
     best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
-    mu = np.where(np.any(acceptance),mu_in * 10, mu_in / 10)
-    mu = np.where(mu < 1e-16,1e-16,mu)
-    return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index],mu
+    return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index]
 
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
@@ -370,7 +370,7 @@ def mpc(
     X_in,
     U_in,
     V_in,
-    mu_in,):
+    ):
 
     _cost = partial(cost,reference=reference)
     _dynamics = partial(dynamics,parameter=parameter)
@@ -384,14 +384,12 @@ def mpc(
             U_in,
             V_in,
             c,
-            g,
-            mu_in,
         )
-    
+
     @jit
     def merit_function(V, g, c, rho):
         return g + np.sum((V + 0.5 * rho * c) * c)
-    
+
     dV2 = np.sum(dV * dV)
     c2 = np.sum(c * c)
     rho  = 2.0 * np.sqrt(dV2 / c2)
@@ -406,7 +404,7 @@ def mpc(
         r,
         rho,
     )
-    X_new, U_new, V_new, g_new, c_new, mu = parallel_line_search(
+    X_new, U_new, V_new, g_new, c_new = parallel_line_search(
             partial(merit_function, rho=rho),
             model_evaluator,
             X_in,
@@ -420,9 +418,8 @@ def mpc(
             c,
             merit_slope,
             armijo_factor=1e-4,
-            mu_in=mu_in,
         )
-    return X_new, U_new, V_new, g_new, c_new , mu
+    return X_new, U_new, V_new, g_new, c_new
 
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(

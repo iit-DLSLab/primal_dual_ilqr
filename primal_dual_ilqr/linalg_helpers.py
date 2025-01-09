@@ -2,9 +2,26 @@ from functools import partial
 
 from jax import numpy as np
 from jax import jit, lax, scipy, vmap
+import jax
+# from trajax.optimizers import project_psd_cone as project_psd_cone_lapack
 
-from trajax.optimizers import project_psd_cone as project_psd_cone_lapack
+@jit
+def project_psd_cone(Q, delta=0.0):
+  """Projects to the cone of positive semi-definite matrices.
 
+  Args:
+    Q: [n, n] symmetric matrix.
+    delta: minimum eigenvalue of the projection.
+
+  Returns:
+    [n, n] symmetric matrix projection of the input.
+  """
+  S, V = np.linalg.eigh(Q)
+  jax.debug.print("S {}", S)
+  jax.debug.print("V {}", V[:14,:3])
+  S = np.maximum(S, delta)
+  Q_plus = np.matmul(V, np.matmul(np.diag(S), V.T))
+  return 0.5 * (Q_plus + Q_plus.T)
 
 @jit
 def _get_psd_eigenvalue_shift_ub(Q):
@@ -49,28 +66,24 @@ def _get_acceptable_psd_eigenvalue_shift(Q, k, delta):
     return lax.select(already_psd, 0.0, k)
 
 
-@partial(jit, static_argnames=("use_lapack", "iterate"))
-def project_psd_cone(Q, delta=0.0, use_lapack=True, iterate=True):
-    """Projects to the cone of positive semi-definite matrices.
+# @partial(jit, static_argnames=("use_lapack", "iterate"))
+# def project_psd_cone(Q, delta=0.0, use_lapack=True, iterate=True):
+#     """Projects to the cone of positive semi-definite matrices.
 
-    Args:
-      Q: [n, n] symmetric matrix.
-      delta: minimum eigenvalue of the projection.
+#     Args:
+#       Q: [n, n] symmetric matrix.
+#       delta: minimum eigenvalue of the projection.
 
-    Returns:
-      [n, n] symmetric matrix projection of the input.
-    """
-    if use_lapack:
-        return project_psd_cone_lapack(Q, delta=delta)
-
-    n = Q.shape[0]
-
-    k = _get_psd_eigenvalue_shift_ub(Q)
-
-    if iterate:
-        k = _get_acceptable_psd_eigenvalue_shift(Q, k, delta)
-
-    return Q + k * np.eye(n)
+#     Returns:
+#       [n, n] symmetric matrix projection of the input.
+#     """
+#     # if use_lapack:
+#     return project_psd_cone_lapack(Q, delta=delta)
+    
+#     # L, D_diag = ldlt(Q)
+#     # D_diag = np.maximum(D_diag, delta)
+#     # jax.debug.print("D_diag {}", D_diag)
+#     # return L @ np.diag(D_diag) @ L.T
 
 
 @jit
