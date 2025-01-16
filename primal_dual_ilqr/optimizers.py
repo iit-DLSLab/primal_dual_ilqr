@@ -419,7 +419,7 @@ def mpc(
             merit_slope,
             armijo_factor=1e-4,
         )
-    return X_new, U_new, V_new, g_new, c_new
+    return X_new, U_new, V_new
 
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(
