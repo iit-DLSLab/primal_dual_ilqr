@@ -8,7 +8,7 @@ from functools import partial
 
 import jax
 
-def lqr_step(P, p, Q, q, R, r, M, A, B, c,mu):
+def lqr_step(P, p, Q, q, R, r, M, A, B, c):
     """Single LQR Step.
 
     Args:

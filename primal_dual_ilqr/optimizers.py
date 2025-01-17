@@ -18,6 +18,52 @@ from .linalg_helpers import (
 from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout
 import time
 
+def linearize_scan(fun, argnums=3):
+    """Gradient or Jacobian operator using scan.
+
+    Args:
+        fun: numpy scalar or vector function with signature fun(x, u, t, *args).
+        argnums: number of leading arguments of fun to process.
+
+    Returns:
+        A function that evaluates Gradients or Jacobians with respect to states and
+        controls along a trajectory.
+
+        Example:
+            dynamics_jacobians = linearize(dynamics)
+            cost_gradients = linearize(cost)
+            A, B = dynamics_jacobians(X, pad(U), timesteps)
+            q, r = cost_gradients(X, pad(U), timesteps)
+
+            where,
+              X is [T+1, n] state trajectory,
+              U is [T, m] control sequence (pad(U) pads a 0 row for convenience),
+              timesteps is typically np.arange(T+1)
+
+              and A, B are Dynamics Jacobians wrt state (x) and control (u) of
+              shape [T+1, n, n] and [T+1, n, m] respectively;
+
+              and q, r are Cost Gradients wrt state (x) and control (u) of
+              shape [T+1, n] and [T+1, m] respectively.
+
+              Note: due to padding of U, last row of A, B, and r may be discarded.
+    """
+    jacobian_x = jax.jacobian(fun)
+    jacobian_u = jax.jacobian(fun, argnums=1)
+
+    def scan_fun(carry, inputs):
+        args = (*carry, *inputs)
+        A = jacobian_x(*args)
+        B = jacobian_u(*args)
+        return carry, (A, B)
+
+    def linearizer(x, u, t, *args):
+        inputs = (x, u, t)
+        _, (A, B) = lax.scan(scan_fun, args, inputs)
+        return A, B
+
+    return linearizer
+
 def quadratizeGN(fun, argnums=3):
 
     J_x = jax.jacobian(fun)
@@ -136,22 +182,23 @@ def compute_search_direction(
     # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
     R = R + 1e-6 * np.eye(R.shape[-1])
 
-    linearizer = linearize(lagrangian(cost, dynamics, x0), argnums=5)
-    q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    linearizer = linearize_scan(cost)
+    q, r_pad = linearizer(X, pad(U), np.arange(T + 1))
     r = r_pad[:-1]
 
-    dynamics_linearizer = linearize(dynamics)
+    dynamics_linearizer = linearize_scan(dynamics)
     A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
     A = A_pad[:-1]
     B = B_pad[:-1]
 
-    # K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
-    K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+    K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
+    # K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
 
-    dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
-    dV = dual_lqr(dX, P, p)
+    # dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
+    dX, dU = rollout(K, k, c[0], A, B, c[1:])
+    # dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
-    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+    dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
 
     # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
 
