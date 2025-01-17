@@ -28,10 +28,9 @@ def lqr_step(P, p, Q, q, R, r, M, A, B, c,mu):
       P, p: updated matrices encoding quadratic value function.
     """
     symmetrize = lambda x: 0.5 * (x + x.T)
-    R = R + mu * np.eye(R.shape[0])
-    AtP = A.T @ (P + mu * np.eye(P.shape[0]))
+    AtP = A.T @ P 
     AtPA = AtP @ A
-    BtP = B.T @ (P + mu * np.eye(P.shape[0]))
+    BtP = B.T @ P
     BtPA = BtP @ A
 
     H = BtPA + M.T
@@ -53,7 +52,7 @@ def lqr_step(P, p, Q, q, R, r, M, A, B, c,mu):
 
 
 @jit
-def tvlqr(Q, q, R, r, M, A, B, c,mu):
+def tvlqr(Q, q, R, r, M, A, B, c):
     """Discrete-time Finite Horizon Time-varying LQR.
 
     Args:
@@ -79,7 +78,7 @@ def tvlqr(Q, q, R, r, M, A, B, c,mu):
         P, p = carry
         t = elem
 
-        K, k, P, p = lqr_step(P, p, Q[t], q[t], R[t], r[t], M[t], A[t], B[t], c[t],mu)
+        K, k, P, p = lqr_step(P, p, Q[t], q[t], R[t], r[t], M[t], A[t], B[t], c[t])
 
         new_carry = (P, p)
         new_output = (K, k, P, p)
