@@ -134,10 +134,11 @@ def regularize(Q, R, M, make_psd, psd_delta):
     return Q, R
 
 
-@partial(jit, static_argnums=(0, 1))
+@partial(jit, static_argnums=(0, 1,2))
 def compute_search_direction(
     cost,
     dynamics,
+    limited_memory,
     x0,
     X,
     U,
@@ -182,20 +183,25 @@ def compute_search_direction(
     # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
     R = R + 1e-6 * np.eye(R.shape[-1])
 
-    linearizer = linearize_scan(cost)
+    if limited_memory:
+        linearizer = linearize_scan(cost)
+        dynamics_linearizer = linearize_scan(dynamics)
+    else :
+        linearizer = linearize(cost)
+        dynamics_linearizer = linearize(dynamics)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1))
     r = r_pad[:-1]
-
-    dynamics_linearizer = linearize_scan(dynamics)
     A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
     A = A_pad[:-1]
     B = B_pad[:-1]
 
-    K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
-    # K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
-
-    # dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
-    dX, dU = rollout(K, k, c[0], A, B, c[1:])
+    if limited_memory:
+        K, k, _, _ = tvlqr(Q, q, R, r, M, A, B, c[1:])
+        dX, dU = rollout(K, k, c[0], A, B, c[1:])
+    else:
+        K, k, _, _ = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+        dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
+    
     # dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
     dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
@@ -407,10 +413,11 @@ def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
 
     return g, c
 
-@partial(jit, static_argnums=(0, 1))
+@partial(jit, static_argnums=(0, 1,2))
 def mpc(
     cost,
     dynamics,
+    limited_mempory,
     reference,
     parameter,
     x0,
@@ -426,6 +433,7 @@ def mpc(
     dX,dU, dV, q, r = compute_search_direction(
             _cost,
             _dynamics,
+            limited_mempory,
             x0,
             X_in,
             U_in,
