@@ -184,27 +184,27 @@ def compute_search_direction(
     R = R + 1e-6 * np.eye(R.shape[-1])
 
     if limited_memory:
-        linearizer = linearize_scan(cost)
+        linearizer = linearize_scan(lagrangian(cost, dynamics, x0),argnums = 5)
         dynamics_linearizer = linearize_scan(dynamics)
     else :
-        linearizer = linearize(cost)
+        linearizer = linearize(lagrangian(cost, dynamics, x0),argnums = 5)
         dynamics_linearizer = linearize(dynamics)
-    q, r_pad = linearizer(X, pad(U), np.arange(T + 1))
+    q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
     r = r_pad[:-1]
     A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
     A = A_pad[:-1]
     B = B_pad[:-1]
 
     if limited_memory:
-        K, k, _, _ = tvlqr(Q, q, R, r, M, A, B, c[1:])
+        K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
         dX, dU = rollout(K, k, c[0], A, B, c[1:])
     else:
-        K, k, _, _ = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+        K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
         dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
     
-    # dV = dual_lqr(dX, P, p)
+    dV = dual_lqr(dX, P, p)
     # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
-    dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
 
     # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
 
