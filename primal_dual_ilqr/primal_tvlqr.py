@@ -214,7 +214,7 @@ def tvlqr_gpu(Q, q, R, r, M, A, B, c):
     p = result[:, 2 * n + 1, :]
 
     def getKs(t):
-        symmetrize = lambda x: 0.5 * (x + x.T)
+        # symmetrize = lambda x: 0.5 * (x + x.T)
 
         BtP = B[t].T @ P[t + 1]
         BtPA = BtP @ A[t]
@@ -222,10 +222,10 @@ def tvlqr_gpu(Q, q, R, r, M, A, B, c):
         H = BtPA + M[t].T
         h = B[t].T @ p[t + 1] + BtP @ c[t] + r[t]
 
-        G = symmetrize(R[t] + BtP @ B[t])
+        # G = symmetrize(R[t] + BtP @ B[t])
 
-        f = scipy.linalg.cho_factor(G)
-        K_k = scipy.linalg.cho_solve(f, -np.hstack((H, h.reshape([-1, 1]))))
+        # f = scipy.linalg.cho_factor(G)
+        K_k = scipy.linalg.solve(R[t] + BtP @ B[t], -np.hstack((H, h.reshape([-1, 1]))))
         K = K_k[:, :-1]
         k = K_k[:, -1]
 
