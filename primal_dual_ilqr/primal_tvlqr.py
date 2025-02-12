@@ -231,13 +231,12 @@ def tvlqr_gpu_constraint(Q, q, R, r, M, A, B, c,hx,hu,h_bar):
         K = K_k[:, :-1]
         k = K_k[:, -1]
         
-        ks = h_bar[t] - hu[t]@k
-        Ks = hx[t] - hu[t]@K
+        ks = h_bar[t] + hu[t]@k
+        Ks = hx[t] + hu[t]@K
 
-        
-        pi = k + (ks.T@Quu_bar@psi.T).T
-        Pi = K +( Ks.T@Quu_bar@psi.T).T
-
+        pi = k - (ks.T@Quu_bar@psi.T).T
+        Pi = K - (Ks.T@Quu_bar@psi.T).T
+    
         return Pi, pi
 
     K, k = vmap(getKs)(np.arange(T))

@@ -326,7 +326,6 @@ def compute_constraint_search_direction(
     B = B_pad[:-1]
     hx, hu = eq_constarints_linearizer(X, pad(U), np.arange(T + 1))
     h_bar = vmap(eq_constraints)(X, pad(U), np.arange(T + 1))
-    jax.debug.print("h_bar: {}",h_bar)
     if limited_memory:
         K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
         dX, dU = rollout(K, k, c[0], A, B, c[1:])
