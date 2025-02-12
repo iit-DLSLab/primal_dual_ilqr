@@ -15,7 +15,7 @@ from .linalg_helpers import (
     project_psd_cone,
 )
 
-from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout
+from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout, tvlqr_gpu_constraint
 import time
 
 def linearize_scan(fun, argnums=3):
@@ -63,7 +63,51 @@ def linearize_scan(fun, argnums=3):
         return A, B
 
     return linearizer
+def linearize_obj_scan(fun, argnums=5):
+    """Gradient or Jacobian operator using scan.
 
+    Args:
+        fun: numpy scalar or vector function with signature fun(x, u, t, *args).
+        argnums: number of leading arguments of fun to process.
+
+    Returns:
+        A function that evaluates Gradients or Jacobians with respect to states and
+        controls along a trajectory.
+
+        Example:
+            dynamics_jacobians = linearize(dynamics)
+            cost_gradients = linearize(cost)
+            A, B = dynamics_jacobians(X, pad(U), timesteps)
+            q, r = cost_gradients(X, pad(U), timesteps)
+
+            where,
+              X is [T+1, n] state trajectory,
+              U is [T, m] control sequence (pad(U) pads a 0 row for convenience),
+              timesteps is typically np.arange(T+1)
+
+              and A, B are Dynamics Jacobians wrt state (x) and control (u) of
+              shape [T+1, n, n] and [T+1, n, m] respectively;
+
+              and q, r are Cost Gradients wrt state (x) and control (u) of
+              shape [T+1, n] and [T+1, m] respectively.
+
+              Note: due to padding of U, last row of A, B, and r may be discarded.
+    """
+    jacobian_x = jax.jacobian(fun)
+    jacobian_u = jax.jacobian(fun, argnums=1)
+
+    def scan_fun(carry, inputs):
+        args = (*carry, *inputs)
+        A = jacobian_x(*args)
+        B = jacobian_u(*args)
+        return carry, (A, B)
+
+    def linearizer(x, u,  v, v1, t, *args):
+        inputs = (x, u, v, v1,t)
+        _, (A, B) = lax.scan(scan_fun, args, inputs)
+        return A, B
+
+    return linearizer
 def quadratizeGN(fun, argnums=3):
 
     J_x = jax.jacobian(fun)
@@ -184,7 +228,7 @@ def compute_search_direction(
     R = R + 1e-6 * np.eye(R.shape[-1])
 
     if limited_memory:
-        linearizer = linearize_scan(lagrangian(cost, dynamics, x0),argnums = 5)
+        linearizer = linearize_obj_scan(lagrangian(cost, dynamics, x0),argnums = 5)
         dynamics_linearizer = linearize_scan(dynamics)
     else :
         linearizer = linearize(lagrangian(cost, dynamics, x0),argnums = 5)
@@ -200,6 +244,94 @@ def compute_search_direction(
         dX, dU = rollout(K, k, c[0], A, B, c[1:])
     else:
         K, k, P, p = tvlqr_gpu(Q, q, R, r, M, A, B, c[1:])
+        dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
+    
+    dV = dual_lqr(dX, P, p)
+    # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
+    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+
+    # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
+
+    # candidate_sol = np.concatenate([dX.flatten(), dU.flatten(), dV.flatten()])
+    # candidate_sol = np.concatenate([new_dX.flatten(), new_dU.flatten(), new_dV.flatten()])
+    # error = LHS @ candidate_sol - rhs
+    # debug.print(f"error_norm={np.linalg.norm(error)}")
+
+    # return new_dX, new_dU, new_dV, q, r
+
+    return dX, dU, dV, q, r
+
+@partial(jit, static_argnums=(0, 1,2,3))
+def compute_constraint_search_direction(
+    cost,
+    dynamics,
+    eq_constraints,
+    limited_memory,
+    x0,
+    X,
+    U,
+    V,
+    c,
+):
+    """Computes the SQP search direction.
+
+    Args:
+      cost:          cost function with signature cost(x, u, t).
+      dynamics:      dynamics function with signature dynamics(x, u, t).
+      x0:            [n]           numpy array.
+      X:             [T+1, n]      numpy array.
+      U:             [T, m]        numpy array.
+      V:             [T+1, n]      numpy array.
+      c:             [T+1, n]      numpy array.
+      make_psd:      whether to zero negative eigenvalues after quadratization.
+      psd_delta:     the minimum eigenvalue post PSD cone projection.
+
+    Returns:
+      dX: [T+1, n] numpy array.
+      dU: [T, m]   numpy array.
+      q: [T+1, n]  numpy array.
+      r: [T, m]    numpy array.
+    """
+    T = U.shape[0]
+
+    pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
+
+    # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
+    quadratizer = quadratize(cost)
+    # quadratizer = quadratizeGN(cost, argnums=3)
+    Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
+    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
+
+    R = R_pad[:-1]
+    M = M_pad[:-1]
+
+
+    # Q, R = regularize(Q, R, M, True, 1e-6)
+    Q = Q + 1e-6 * np.eye(Q.shape[-1])
+    # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
+    R = R + 1e-6 * np.eye(R.shape[-1])
+
+    if limited_memory:
+        linearizer = linearize_obj_scan(lagrangian(cost, dynamics, x0),argnums = 5)
+        dynamics_linearizer = linearize_scan(dynamics)
+    else :
+        linearizer = linearize(lagrangian(cost, dynamics, x0),argnums = 5)
+        dynamics_linearizer = linearize(dynamics)
+        eq_constarints_linearizer = linearize(eq_constraints)
+
+    q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    r = r_pad[:-1]
+    A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
+    A = A_pad[:-1]
+    B = B_pad[:-1]
+    hx, hu = eq_constarints_linearizer(X, pad(U), np.arange(T + 1))
+    h_bar = vmap(eq_constraints)(X, pad(U), np.arange(T + 1))
+    jax.debug.print("h_bar: {}",h_bar)
+    if limited_memory:
+        K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
+        dX, dU = rollout(K, k, c[0], A, B, c[1:])
+    else:
+        K, k, P, p = tvlqr_gpu_constraint(Q, q, R, r, M, A, B, c[1:],hx,hu,h_bar)
         dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
     
     dV = dual_lqr(dX, P, p)
@@ -413,7 +545,7 @@ def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
 
     return g, c
 
-@partial(jit, static_argnums=(0, 1,2))
+@partial(jit, static_argnums=(0,1,2))
 def mpc(
     cost,
     dynamics,
@@ -475,7 +607,71 @@ def mpc(
             armijo_factor=1e-4,
         )
     return X_new, U_new, V_new
+@partial(jit, static_argnums=(0,1,2,3))
+def eq_con_mpc(
+    cost,
+    dynamics,
+    eq_constraints,
+    limited_mempory,
+    reference,
+    parameter,
+    x0,
+    X_in,
+    U_in,
+    V_in,
+    ):
 
+    _cost = partial(cost,reference=reference)
+    _dynamics = partial(dynamics,parameter=parameter)
+    _eq_constraints = partial(eq_constraints,parameter=parameter)
+    model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
+    g, c = model_evaluator(X_in, U_in)
+    dX,dU, dV, q, r = compute_constraint_search_direction(
+            _cost,
+            _dynamics,
+            _eq_constraints,
+            limited_mempory,
+            x0,
+            X_in,
+            U_in,
+            V_in,
+            c,
+        )
+
+    @jit
+    def merit_function(V, g, c, rho):
+        return g + np.sum((V + 0.5 * rho * c) * c)
+
+    dV2 = np.sum(dV * dV)
+    c2 = np.sum(c * c)
+    rho  = 2.0 * np.sqrt(dV2 / c2)
+    merit = merit_function(V_in, g, c, rho)
+
+    merit_slope = slope(
+        dX,
+        dU,
+        dV,
+        c,
+        q,
+        r,
+        rho,
+    )
+    X_new, U_new, V_new, g_new, c_new = parallel_line_search(
+            partial(merit_function, rho=rho),
+            model_evaluator,
+            X_in,
+            U_in,
+            V_in,
+            dX,
+            dU,
+            dV,
+            merit,
+            g,
+            c,
+            merit_slope,
+            armijo_factor=1e-4,
+        )
+    return X_new, U_new, V_new
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(
     cost,
