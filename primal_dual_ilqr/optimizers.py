@@ -8,14 +8,14 @@ from trajax.optimizers import evaluate, linearize, quadratize,vectorize
 
 from .kkt_helpers import compute_search_direction_kkt, tvlqr_kkt
 
-from .dual_tvlqr import dual_lqr, dual_lqr_backward, dual_lqr_gpu
+from .dual_tvlqr import dual_lqr, dual_lqr_backward, dual_lqr_gpu,dual_lqr_backward_constrained
 
 from .linalg_helpers import (
     invert_symmetric_positive_definite_matrix,
     project_psd_cone,
 )
 
-from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout, tvlqr_gpu_constraint
+from .primal_tvlqr import tvlqr, tvlqr_gpu, rollout, rollout_gpu,non_linear_rollout, tvlqr_gpu_constrained, rollout_gpu_constrained,tvlqr_constrained
 import time
 
 def linearize_scan(fun, argnums=3):
@@ -134,7 +134,6 @@ def lagrangian(cost, dynamics, x0):
         return c1 + c2 + c3
 
     return fun
-
 def lagrangianNoDyn(cost, x0):
     """Returns a function to evaluate the associated Lagrangian."""
 
@@ -271,7 +270,10 @@ def compute_constraint_search_direction(
     X,
     U,
     V,
+    V_eq,
     c,
+    h_bar,
+    rho,
 ):
     """Computes the SQP search direction.
 
@@ -311,42 +313,25 @@ def compute_constraint_search_direction(
     # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
     R = R + 1e-6 * np.eye(R.shape[-1])
 
-    if limited_memory:
-        linearizer = linearize_obj_scan(lagrangian(cost, dynamics, x0),argnums = 5)
-        dynamics_linearizer = linearize_scan(dynamics)
-    else :
-        linearizer = linearize(lagrangian(cost, dynamics, x0),argnums = 5)
-        dynamics_linearizer = linearize(dynamics)
-        eq_constarints_linearizer = linearize(eq_constraints)
+    linearizer = linearize(cost)
+    dynamics_linearizer = linearize(dynamics)
+    eq_constarints_linearizer = linearize(eq_constraints)
 
-    q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    q, r_pad = linearizer(X, pad(U), np.arange(T + 1))
     r = r_pad[:-1]
     A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
     A = A_pad[:-1]
     B = B_pad[:-1]
     hx, hu = eq_constarints_linearizer(X, pad(U), np.arange(T + 1))
-    h_bar = vmap(eq_constraints)(X, pad(U), np.arange(T + 1))
-    if limited_memory:
-        K, k, P, p = tvlqr(Q, q, R, r, M, A, B, c[1:])
-        dX, dU = rollout(K, k, c[0], A, B, c[1:])
-    else:
-        K, k, P, p = tvlqr_gpu_constraint(Q, q, R, r, M, A, B, c[1:],hx,hu,h_bar)
-        dX, dU = rollout_gpu(K, k, c[0], A, B, c[1:])
     
-    dV = dual_lqr(dX, P, p)
-    # dV = dual_lqr_backward(Q, q, M, A, dX, dU)
-    # dV = dual_lqr_gpu(Q, q, M, A, dX, dU)
+    K, k, P, p, Ks, ks = tvlqr_gpu_constrained(Q, q, R, r, M, A, B, c[1:],hx,hu,h_bar)
+    
+    dX, dU, dVeq = rollout_gpu_constrained(K, k, c[0], A, B, c[1:],Ks,ks)
 
-    # new_dX, new_dU, new_dV, LHS, rhs = tvlqr_kkt(Q, q, R, r, M, A, B, c[1:], c[0])
+    dV = dual_lqr_backward_constrained(Q, q, M, A, hx,dX, dU,dVeq)
 
-    # candidate_sol = np.concatenate([dX.flatten(), dU.flatten(), dV.flatten()])
-    # candidate_sol = np.concatenate([new_dX.flatten(), new_dU.flatten(), new_dV.flatten()])
-    # error = LHS @ candidate_sol - rhs
-    # debug.print(f"error_norm={np.linalg.norm(error)}")
 
-    # return new_dX, new_dU, new_dV, q, r
-
-    return dX, dU, dV, q, r
+    return dX, dU, dV,dVeq, q, r
 @jit
 def merit_rho(c, dV):
     """Determines the merit function penalty parameter to be used.
@@ -379,8 +364,7 @@ def slope(dX, dU, dV, c, q, r, rho):
     Returns:
         dir_derivative: the directional derivative.
     """
-    return np.sum(q * dX) + np.sum(r * dU) + np.sum(dV * c) - rho * np.sum(c * c)
-
+    return np.sum(q * dX) + np.sum(r * dU) + 2*np.sum(dV * c) - rho * np.sum(c * c)
 
 @partial(jit, static_argnums=(0, 1))
 def line_search(
@@ -509,7 +493,7 @@ def parallel_line_search(
         X_new = X_in + alpha * dX
         U_new = U_in + alpha * dU
         V_new = V_in + alpha * dV
-        new_g, new_c = model_evaluator(X_new, U_new)
+        new_g, new_c = model_evaluator(X_new, U_new) #this cam br probly avoided 
         new_merit = merit_function(V_new, new_g, new_c)
         new_merit = np.where(np.isnan(new_merit), current_merit, new_merit)
         return X_new, U_new, V_new, new_g, new_c, new_merit
@@ -519,6 +503,68 @@ def parallel_line_search(
     best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
     return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index]
 
+@partial(jit, static_argnums=(0, 1))
+def parallel_line_search_constrained(
+    merit_function,
+    model_evaluator,
+    X_in,
+    U_in,
+    V_in,
+    dX,
+    dU,
+    dV,
+    current_merit,
+    current_g,
+    current_c,
+    merit_slope,
+    armijo_factor,
+    
+):
+    """Performs a primal-dual line search on an augmented Lagrangian merit function in parralel fixing the number of steps.
+
+    Args:
+      merit_function:  merit function mapping V, g, c to the merit scalar.
+      X_in:            [T+1, n]      numpy array.
+      U_in:            [T, m]        numpy array.
+      V_in:            [T+1, n]      numpy array.
+      dX:              [T+1, n]      numpy array.
+      dU:              [T, m]        numpy array.
+      dV:              [T+1, n]      numpy array.
+      current_merit:   the merit function value at X, U, V.
+      current_g:       the cost value at X, U, V.
+      current_c:       the constraint values at X, U, V.
+      merit_slope:     the directional derivative of the merit function.
+      armijo_factor:   the Armijo parameter to be used in the line search.
+      alpha_0:         initial line search value.
+      alpha_mult:      a constant in (0, 1) that gets multiplied to alpha to update it.
+      alpha_min:       minimum line search value.
+
+    Returns:
+      X: [T+1, n]     numpy array, representing the optimal state trajectory.
+      U: [T, m]       numpy array, representing the optimal control trajectory.
+      V: [T+1, n]     numpy array, representing the optimal multiplier trajectory.
+      new_g:          the cost value at the new X, U, V.
+      new_c:          the constraint values at the new X, U, V.
+      no_errors:       whether no error occurred during the line search.
+    """
+    def step_acceptance(merit,alpha):
+        return merit > current_merit + alpha * armijo_factor * merit_slope
+    alpha_values = np.exp2(-np.arange(11))
+    def body(alpha):
+        X_new = X_in + alpha * dX
+        U_new = U_in + alpha * dU
+        V_new = V_in + alpha * dV
+        new_g, new_c, new_hbar = model_evaluator(X_new, U_new) #this cam br probly avoided 
+        # new_ctot = (1-alpha) * current_c
+        new_ctot = np.concatenate([new_c,new_hbar],axis = 1)
+        new_merit = merit_function(V_new, new_g, new_ctot)        
+        new_merit = np.where(np.isnan(new_merit), current_merit, new_merit)
+        return X_new, U_new, V_new, new_merit ,new_ctot
+
+    X, U, V, new_merit,new_ctot = vmap(body)(alpha_values)
+    acceptance = vmap(step_acceptance)(new_merit,alpha_values)
+    best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
+    return X[best_index], U[best_index], V[best_index], new_ctot[best_index]
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
     """Evaluates the costs and constraints based on the provided primal variables.
@@ -543,6 +589,33 @@ def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
     c = np.vstack([x0 - X[0], vmap(residual_fn)(np.arange(T))])
 
     return g, c
+
+@partial(jit, static_argnums=(0, 1, 2))
+def model_evaluator_helper_eq_con(cost, dynamics,eq_con,x0, X, U):
+    """Evaluates the costs and constraints based on the provided primal variables.
+
+    Args:
+      cost:            cost function with signature cost(x, u, t).
+      dynamics:        dynamics function with signature dynamics(x, u, t).
+      x0:              [n]           numpy array.
+      X:               [T+1, n]      numpy array.
+      U:               [T, m]        numpy array.
+
+    Returns:
+      g: the cost value (a scalar).
+      c: the constraint values (a [T+1, n] numpy array).
+    """
+    T = U.shape[0]
+
+    costs = partial(evaluate, cost)
+    g = np.sum(costs(X, np.pad(U, [[0, 1], [0, 0]])))
+
+    residual_fn = lambda t: dynamics(X[t], U[t], t) - X[t + 1]
+    c = np.vstack([x0 - X[0], vmap(residual_fn)(np.arange(T))])
+
+    h_bar = vmap(eq_con)(X, np.pad(U, [[0, 1], [0, 0]]), np.arange(T + 1))
+
+    return g, c, h_bar
 
 @partial(jit, static_argnums=(0,1,2))
 def mpc(
@@ -618,14 +691,18 @@ def eq_con_mpc(
     X_in,
     U_in,
     V_in,
+    Veq_in,  
+    rho,
+    eq_tol,
     ):
 
     _cost = partial(cost,reference=reference)
     _dynamics = partial(dynamics,parameter=parameter)
     _eq_constraints = partial(eq_constraints,parameter=parameter)
-    model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
-    g, c = model_evaluator(X_in, U_in)
-    dX,dU, dV, q, r = compute_constraint_search_direction(
+    model_evaluator = partial(model_evaluator_helper_eq_con, _cost, _dynamics,_eq_constraints,x0)
+    g, c, h_bar = model_evaluator(X_in, U_in)
+    # model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
+    dX,dU, dV,dVeq, q, r = compute_constraint_search_direction(
             _cost,
             _dynamics,
             _eq_constraints,
@@ -634,43 +711,47 @@ def eq_con_mpc(
             X_in,
             U_in,
             V_in,
+            Veq_in,
             c,
+            h_bar,
+            rho,
         )
+    
+    Vtot = np.concatenate([V_in,Veq_in],axis = 1)
+    ctot = np.concatenate([c,h_bar],axis = 1)
+    dVtot = np.concatenate([dV,dVeq],axis = 1)
 
-    @jit
-    def merit_function(V, g, c, rho):
-        return g + np.sum((V + 0.5 * rho * c) * c)
+    def merit_function(Vtot, g, ctot, rho):
+        return g + np.sum((Vtot + 0.5 * rho * ctot) * ctot)
+    def merit_for_slope(a,b,v):
+        g, c, h_bar = model_evaluator(a, b)
+        ctot = np.concatenate([c,h_bar],axis = 1)
+        return merit_function(v, g, ctot, rho)
+    merit = merit_function(Vtot, g, ctot, rho)
+    merit_slope = jax.jvp(merit_for_slope,(X_in,U_in,Vtot),(dX,dU,dVtot))[1]
 
-    dV2 = np.sum(dV * dV)
-    c2 = np.sum(c * c)
-    rho  = 2.0 * np.sqrt(dV2 / c2)
-    merit = merit_function(V_in, g, c, rho)
-
-    merit_slope = slope(
-        dX,
-        dU,
-        dV,
-        c,
-        q,
-        r,
-        rho,
-    )
-    X_new, U_new, V_new, g_new, c_new = parallel_line_search(
+    X_new, U_new, Vtot_new,ctot_new = parallel_line_search_constrained(
             partial(merit_function, rho=rho),
             model_evaluator,
             X_in,
             U_in,
-            V_in,
+            Vtot,
             dX,
             dU,
-            dV,
+            dVtot,
             merit,
             g,
-            c,
+            ctot,
             merit_slope,
             armijo_factor=1e-4,
         )
-    return X_new, U_new, V_new
+    V_new, rho_new, eq_tol_new = lax.cond(
+        np.sqrt(np.sum(ctot_new * ctot_new)) < eq_tol,
+        lambda _: (Vtot_new-rho*ctot_new, rho, eq_tol),
+        lambda _: (Vtot, 100 * rho, np.power(rho,-0.1)),
+        operand=None
+    )
+    return X_new, U_new, V_new[:,:X_in.shape[-1]],V_new[:,X_in.shape[-1]:],rho_new,eq_tol_new
 @partial(jit, static_argnums=(0, 1))
 def primal_dual_ilqr(
     cost,

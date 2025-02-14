@@ -50,7 +50,55 @@ def lqr_step(P, p, Q, q, R, r, M, A, B, c):
 
     return K, k, P, p
 
+def constrained_lqr_step(P, p, Q, q, R, r, M, A, B, c,hx,hu,h_bar):
+    """Single LQR Step.
 
+    Args:
+      P: [n, n] numpy array.
+      p: [n]    numpy array.
+      Q: [n, n] numpy array.
+      q: [n]    numpy array.
+      R: [m, m] numpy array.
+      r: [m]    numpy array.
+      M: [n, m] numpy array.
+      A: [n, n] numpy array.
+      B: [n, m] numpy array.
+      c: [n]    numpy array.
+
+    Returns:
+      K, k: state feedback gain and affine term.
+      P, p: updated matrices encoding quadratic value function.
+    """
+    symmetrize = lambda x: 0.5 * (x + x.T)
+    AtP = A.T @ P 
+    AtPA = AtP @ A
+    BtP = B.T @ P
+    BtPA = BtP @ A
+
+    H = BtPA + M.T
+    h = B.T @ p + BtP @ c + r
+
+    G = R + BtP @ B
+    psi = scipy.linalg.solve(R + BtP @ B,hu.T)
+    Quu_bar = scipy.linalg.solve(hu@psi,np.eye(hu.shape[0]))
+    # K_k = solve_symmetric_positive_definite_system(
+    #     G, -np.hstack((H, h.reshape([-1, 1])))
+    # )
+    K_k = np.linalg.solve(G, -np.hstack((H, h.reshape([-1, 1]))))
+    K = K_k[:, :-1]
+    k = K_k[:, -1]
+    ks = h_bar + hu@k
+    Ks = hx + hu@K
+
+    pi = k - (ks.T@Quu_bar@psi.T).T
+    Pi = K - (Ks.T@Quu_bar@psi.T).T
+
+    P = Q + (Pi.T@R -2*M)@Pi
+    p = q + Pi.T@(R@pi - r)-M@pi
+    # P = Q + AtPA + K.T @ H
+    # p = q + A.T @ p + AtP @ c + K.T @ h
+
+    return Pi, pi, P, p, Quu_bar@Ks, Quu_bar@ks
 @jit
 def tvlqr(Q, q, R, r, M, A, B, c):
     """Discrete-time Finite Horizon Time-varying LQR.
@@ -94,9 +142,52 @@ def tvlqr(Q, q, R, r, M, A, B, c):
         np.concatenate([p, q[T].reshape([1, n])]),
     )
 
-
 @jit
-def tvlqr_gpu_constraint(Q, q, R, r, M, A, B, c,hx,hu,h_bar):
+def tvlqr_constrained(Q, q, R, r, M, A, B, c,hx,hu,h_bar):
+    """Discrete-time Finite Horizon Time-varying LQR.
+
+    Args:
+      Q: [T+1, n, n]  numpy array.
+      q: [T+1, n]     numpy array.
+      R: [T, m, m]    numpy array.
+      r: [T, m]       numpy array.
+      M: [T, n, m]    numpy array.
+      A: [T, n, n]    numpy array.
+      B: [T, n, m]    numpy array.
+      c: [T, n]       numpy array.
+
+    Returns:
+      K: [T, m, n]    Gains
+      k: [T, m]       Affine terms (u_t = K[t] x_t + k[t])
+      P: [T+1, n, n]  numpy array encoding initial value function.
+      p: [T+1, n]     numpy array encoding initial value function.
+    """
+
+    T = Q.shape[0] - 1
+    n = Q.shape[1]
+    def f(carry, elem):
+        P, p = carry
+        t = elem
+
+        K, k, P, p, Ks, ks = constrained_lqr_step(P, p, Q[t], q[t], R[t], r[t], M[t], A[t], B[t], c[t],hx[t],hu[t],h_bar[t])
+
+        new_carry = (P, p)
+        new_output = (K, k, P, p, Ks, ks)
+
+        return new_carry, new_output
+
+    K, k, P, p, Ks, ks = lax.scan(f, (Q[T], q[T]), np.arange(T), T, reverse=True)[1]
+
+    return (
+        K,
+        k,
+        np.concatenate([P, Q[T].reshape([1, n, n])]),
+        np.concatenate([p, q[T].reshape([1, n])]),
+        Ks,
+        ks,
+    )
+@jit
+def tvlqr_gpu_constrained(Q, q, R, r, M, A, B, c,hx,hu,h_bar):
     """Discrete-time Finite Horizon Time-varying LQR.
 
     This is a O(log T) parallel time complexity implementation, based on
@@ -237,11 +328,11 @@ def tvlqr_gpu_constraint(Q, q, R, r, M, A, B, c,hx,hu,h_bar):
         pi = k - (ks.T@Quu_bar@psi.T).T
         Pi = K - (Ks.T@Quu_bar@psi.T).T
     
-        return Pi, pi
+        return Pi, pi, Quu_bar@Ks, Quu_bar@ks
 
-    K, k = vmap(getKs)(np.arange(T))
+    K, k, Ks, ks = vmap(getKs)(np.arange(T))
 
-    return K, k, P, p
+    return K, k, P, p, Ks, ks
 @jit
 def tvlqr_gpu(Q, q, R, r, M, A, B, c):
     """Discrete-time Finite Horizon Time-varying LQR.
@@ -455,3 +546,31 @@ def rollout_gpu(K, k, x0, A, B, c):
     U = vmap(lambda t: K[t] @ X[t] + k[t])(np.arange(T))
 
     return X, U
+
+def rollout_gpu_constrained(K, k, x0, A, B, c, Ks, ks):
+    """Rolls-out time-varying linear policy u[t] = K[t] x[t] + k[t]."""
+    T, _, n = K.shape
+
+    def fn(prev, next):
+        F = prev[:-1]
+        f = prev[-1]
+        G = next[:-1]
+        g = next[-1]
+        return np.concatenate([G @ F, (g + G @ f).reshape([1, n])])
+
+    get_elem = lambda t: np.concatenate(
+        [A[t] + B[t] @ K[t], (c[t] + B[t] @ k[t]).reshape([1, n])]
+    )
+    elems = vmap(get_elem)(np.arange(T))
+    comp = lax.associative_scan(lambda l, r: vmap(fn)(l, r), elems)
+    X = np.concatenate(
+        [
+            x0.reshape(1, n),
+            vmap(lambda t: comp[t, :-1, :] @ x0 + comp[t, -1, :])(np.arange(T)),
+        ]
+    )
+
+    U = vmap(lambda t: K[t] @ X[t] + k[t])(np.arange(T))
+    Veq = vmap(lambda t: Ks[t] @ X[t] + ks[t])(np.arange(T+1))
+
+    return X, U, Veq

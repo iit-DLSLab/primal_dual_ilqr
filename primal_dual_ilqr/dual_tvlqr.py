@@ -50,6 +50,36 @@ def dual_lqr_backward(Q, q, M, A, X, U):
 
     return np.concatenate([out[0].reshape(1, n), out[1]])
 
+@jit
+def dual_lqr_backward_constrained(Q, q, M, A,hx, X, U,Veq):
+    """Dual LQR solve.
+
+    Args:
+      Q: [T+1, n, n]   numpy array.
+      M: [T,   n, m]   numpy array.
+      q: [T+1, n]      numpy array.
+      A: [T,   n, n]   numpy array.
+      X: [T+1, n]      numpy array.
+      U: [T,   m]      numpy array.
+
+    Returns:
+      V: [T+1, n] numpy array.
+    """
+    n = X.shape[1]
+    T = U.shape[0]
+
+    V_T = Q[T] @ X[T] + q[T]
+
+    elems = vmap(lambda t: (A[t].T, Q[t] @ X[t] + M[t] @ U[t] + q[t] + hx[t].T@Veq[t]))(
+        np.arange(T)
+    )
+
+    def f(v, e):
+        return e[0] @ v + e[1], v
+
+    out = lax.scan(f, V_T, elems, T, reverse=True)
+
+    return np.concatenate([out[0].reshape(1, n), out[1]])
 
 @jit
 def dual_lqr_gpu(Q, q, M, A, X, U):
