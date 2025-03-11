@@ -177,10 +177,11 @@ def regularize(Q, R, M, make_psd, psd_delta):
     return Q, R
 
 
-@partial(jit, static_argnums=(0, 1,2))
+@partial(jit, static_argnums=(0, 1, 2, 3))
 def compute_search_direction(
     cost,
     dynamics,
+    hessian_approx,
     limited_memory,
     x0,
     X,
@@ -212,19 +213,20 @@ def compute_search_direction(
     pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
 
     # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
-    quadratizer = quadratize(cost)
-    # quadratizer = quadratizeGN(cost, argnums=3)
-    Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
+    # quadratizer = quadratize(cost)
+    # # # # quadratizer = quadratizeGN(cost, argnums=3)
+    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
     # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
 
+    Q, R_pad, M_pad = jax.vmap(hessian_approx)(X, pad(U), np.arange(T + 1))
+    
     R = R_pad[:-1]
-    M = M_pad[:-1]
+    M = M_pad[:-1]   
 
-
-    # Q, R = regularize(Q, R, M, True, 1e-6)
-    Q = Q + 1e-6 * np.eye(Q.shape[-1])
-    # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
-    R = R + 1e-6 * np.eye(R.shape[-1])
+    # # # Q, R = regularize(Q, R, M, True, 1e-6)
+    Q = Q + 1e-4 * np.eye(Q.shape[-1])
+    # # # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
+    R = R + 1e-4 * np.eye(R.shape[-1])
 
     if limited_memory:
         linearizer = linearize_obj_scan(lagrangian(cost, dynamics, x0),argnums = 5)
@@ -234,6 +236,7 @@ def compute_search_direction(
         dynamics_linearizer = linearize(dynamics)
     q, r_pad = linearizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
     r = r_pad[:-1]
+
     A_pad, B_pad = dynamics_linearizer(X, pad(U), np.arange(T + 1))
     A = A_pad[:-1]
     B = B_pad[:-1]
@@ -617,10 +620,11 @@ def model_evaluator_helper_eq_con(cost, dynamics,eq_con,x0, X, U):
 
     return g, c, h_bar
 
-@partial(jit, static_argnums=(0,1,2))
+@partial(jit, static_argnums=(0,1,2,3))
 def mpc(
     cost,
     dynamics,
+    hessian_approx,
     limited_mempory,
     reference,
     parameter,
@@ -631,12 +635,14 @@ def mpc(
     ):
 
     _cost = partial(cost,reference=reference)
+    _hessian_approx = partial(hessian_approx,reference=reference)
     _dynamics = partial(dynamics,parameter=parameter)
     model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
     g, c = model_evaluator(X_in, U_in)
     dX,dU, dV, q, r = compute_search_direction(
             _cost,
             _dynamics,
+            _hessian_approx,
             limited_mempory,
             x0,
             X_in,
