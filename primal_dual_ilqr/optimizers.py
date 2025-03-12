@@ -374,9 +374,8 @@ def parallel_line_search(
     best_index = np.where(np.any(acceptance),np.argmin(acceptance),0)
     return X[best_index], U[best_index], V[best_index], new_g[best_index], new_c[best_index]
 
-@partial(jit, static_argnums=(0, 1))
+@partial(jit, static_argnums=(0))
 def filter_line_search(
-    cost,
     model_evaluator,
     X_in,
     U_in,
@@ -484,9 +483,9 @@ def filter_line_search(
     )
     
     # If not accepted, return original point
-    X = np.where(accepted, X, X_in)
-    U = np.where(accepted, U, U_in)
-    V = np.where(accepted, V, V_in)
+    # X = np.where(accepted, X, X_in)
+    # U = np.where(accepted, U, U_in)
+    # V = np.where(accepted, V, V_in)
     
     # Get final constraint violation and cost
     # final_cost, final_c = model_evaluator(X, U)
@@ -579,7 +578,6 @@ def mpc(
     #         armijo_factor=1e-4,
     #     )
     X_new, U_new, V_new = filter_line_search(
-    _cost,
     model_evaluator,
     X_in,
     U_in,
