@@ -79,22 +79,22 @@ def constrained_lqr_step(P, p, Q, q, R, r, M, A, B, c,hx,hu,h_bar):
     h = B.T @ p + BtP @ c + r
 
     G = R + BtP @ B
-    psi = scipy.linalg.solve(R + BtP @ B,hu.T)
+    psi = scipy.linalg.solve(G,hu.T)
     Quu_bar = scipy.linalg.solve(hu@psi,np.eye(hu.shape[0]))
     # K_k = solve_symmetric_positive_definite_system(
     #     G, -np.hstack((H, h.reshape([-1, 1])))
     # )
-    K_k = np.linalg.solve(G, -np.hstack((H, h.reshape([-1, 1]))))
+    K_k = np.linalg.solve(G, np.hstack((H, h.reshape([-1, 1]))))
     K = K_k[:, :-1]
     k = K_k[:, -1]
-    ks = h_bar + hu@k
-    Ks = hx + hu@K
+    ks = h_bar - hu@k
+    Ks = hx - hu@K
 
-    pi = k - (ks.T@Quu_bar@psi.T).T
-    Pi = K - (Ks.T@Quu_bar@psi.T).T
+    pi = k + (ks.T@Quu_bar@psi.T).T
+    Pi = K + (Ks.T@Quu_bar@psi.T).T
 
-    P = Q + (Pi.T@R -2*M)@Pi
-    p = q + Pi.T@(R@pi - r)-M@pi
+    P = Q + AtPA + (Pi.T@G -2*H.T)@Pi
+    p = q + A.T@p + Pi.T@(G@pi - h)-H.T@pi
     # P = Q + AtPA + K.T @ H
     # p = q + A.T @ p + AtP @ c + K.T @ h
 
@@ -570,7 +570,7 @@ def rollout_gpu_constrained(K, k, x0, A, B, c, Ks, ks):
         ]
     )
 
-    U = vmap(lambda t: K[t] @ X[t] + k[t])(np.arange(T))
+    U = vmap(lambda t: -K[t] @ X[t] - k[t])(np.arange(T))
     Veq = vmap(lambda t: Ks[t] @ X[t] + ks[t])(np.arange(T+1))
 
     return X, U, Veq

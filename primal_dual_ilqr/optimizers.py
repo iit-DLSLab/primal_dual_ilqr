@@ -153,21 +153,14 @@ def compute_search_direction(
 
     pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
 
-    # quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
-    # quadratizer = quadratize(cost)
-    # # # # quadratizer = quadratizeGN(cost, argnums=3)
-    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
-    # Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
-
-    Q, R_pad, M_pad = jax.vmap(hessian_approx)(X, pad(U), np.arange(T + 1))
+    if hessian_approx is None:
+        quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
+        Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+    else:
+        Q, R_pad, M_pad = jax.vmap(hessian_approx)(X, pad(U), np.arange(T + 1))
     
     R = R_pad[:-1]
     M = M_pad[:-1]   
-
-    # # # Q, R = regularize(Q, R, M, True, 1e-6)
-    Q = Q + 1e-4 * np.eye(Q.shape[-1])
-    # # # Q = Q.at[T].set(Q[T] + 1e-3 * np.eye(Q[T].shape[0]))
-    R = R + 1e-4 * np.eye(R.shape[-1])
 
     if limited_memory:
         linearizer = linearize_obj_scan(lagrangian(cost, dynamics, x0),argnums = 5)
@@ -482,13 +475,6 @@ def filter_line_search(
         (X_in, U_in, V_in, alpha, False)
     )
     
-    # If not accepted, return original point
-    # X = np.where(accepted, X, X_in)
-    # U = np.where(accepted, U, U_in)
-    # V = np.where(accepted, V, V_in)
-    
-    # Get final constraint violation and cost
-    # final_cost, final_c = model_evaluator(X, U)
     return X, U, V
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
@@ -529,7 +515,10 @@ def mpc(
     ):
 
     _cost = partial(cost,reference=reference)
-    _hessian_approx = partial(hessian_approx,reference=reference)
+    if hessian_approx is not None:
+        _hessian_approx = partial(hessian_approx,reference=reference)
+    else:
+        _hessian_approx = None
     _dynamics = partial(dynamics,parameter=parameter)
     model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
     g, c = model_evaluator(X_in, U_in)
