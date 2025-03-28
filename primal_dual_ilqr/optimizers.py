@@ -195,7 +195,7 @@ def compute_search_direction(
 
     # return new_dX, new_dU, new_dV, q, r
 
-    return dX, dU, dV, q, r
+    return dX, dU, dV, q, r , K[0]
 @jit
 def merit_rho(c, dV):
     """Determines the merit function penalty parameter to be used.
@@ -508,21 +508,22 @@ def mpc(
     limited_mempory,
     reference,
     parameter,
+    W,
     x0,
     X_in,
     U_in,
     V_in,
     ):
 
-    _cost = partial(cost,reference=reference)
+    _cost = partial(cost,W,reference)
     if hessian_approx is not None:
-        _hessian_approx = partial(hessian_approx,reference=reference)
+        _hessian_approx = partial(hessian_approx,W,reference)
     else:
         _hessian_approx = None
     _dynamics = partial(dynamics,parameter=parameter)
     model_evaluator = partial(model_evaluator_helper, _cost, _dynamics,reference,parameter,x0)
     g, c = model_evaluator(X_in, U_in)
-    dX,dU, dV, q, r = compute_search_direction(
+    dX,dU, dV, q, r, K = compute_search_direction(
             _cost,
             _dynamics,
             _hessian_approx,
@@ -579,4 +580,4 @@ def mpc(
     q,
     r,)
 
-    return X_new, U_new, V_new
+    return X_new, U_new, V_new, K
