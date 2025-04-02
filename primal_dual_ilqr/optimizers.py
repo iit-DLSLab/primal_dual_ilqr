@@ -474,8 +474,113 @@ def filter_line_search(
         body,
         (X_in, U_in, V_in, alpha, False)
     )
+    jax.debug.print("{}",alpha)
     
     return X, U, V
+@partial(jit, static_argnums=(0))
+def parallel_filter_line_search(
+    model_evaluator,
+    X_in,
+    U_in,
+    V_in,
+    dX,
+    dU,
+    dV,
+    current_cost,
+    current_c,
+    q,
+    r,
+    # Hyperparameters
+    alpha_min=1e-4,
+    theta_max=1e-2,
+    theta_min=1e-6,
+    eta=1e-4,
+    gamma_phi=1e-6,
+    gamma_theta=1e-6,
+    gamma_alpha=0.5,
+):
+    """Performs a backtracking line search.
+    
+    Args:
+      X_in: [T+1, n] numpy array of current states.
+      U_in: [T, m] numpy array of current controls.
+      V_in: [T+1, n] numpy array of current multipliers.
+      dX: [T+1, n] numpy array of state search direction.
+      dU: [T, m] numpy array of control search direction.
+      dV: [T+1, n] numpy array of multiplier search direction.
+      current_cost: Current cost value (phi_k).
+      current_c: Current constraint violation (theta_k).
+      alpha_min: Minimum step size.
+      theta_max: Maximum acceptable constraint violation.
+      theta_min: Minimum constraint violation worth considering.
+      eta: Armijo parameter for sufficient decrease.
+      gamma_phi: Cost reduction parameter.
+      gamma_theta: Constraint violation reduction parameter.
+      gamma_alpha: Step size reduction factor.
+      
+    Returns:
+      X: [T+1, n] numpy array of updated states.
+      U: [T, m] numpy array of updated controls.
+      V: [T+1, n] numpy array of updated multipliers.
+      new_cost: Updated cost value.
+      new_c: Updated constraint values.
+      accepted: Whether a step was accepted.
+    """
+    # Initial values
+    alpha_values = np.exp2(-np.arange(11))
+    # alpha = 1.0
+    theta_k = np.sum(current_c * current_c)  # Constraint violation measure
+    phi_k = current_cost
+    slope = np.sum(q*dX) + np.sum(r*dU)
+
+    # def continuation_criterion(inputs):
+    #     _, _, _, alpha, accepted = inputs
+    #     return np.logical_and(np.logical_not(accepted), alpha > alpha_min)
+    
+    def body(alpha):
+        # _, _, _, alpha, _ = inputs
+        
+        # Compute trial point
+        X_new = X_in + alpha * dX
+        U_new = U_in + alpha * dU
+        V_new = V_in + alpha * dV
+        
+        # Evaluate at new point
+        new_cost, new_c = model_evaluator(X_new, U_new)
+        theta_new = np.sum(new_c * new_c)  # Constraint violation measure
+        phi_new = new_cost
+        
+        # Case 1: Large constraint violation but improving
+        case1 = np.logical_and(
+            theta_new > theta_max,
+            theta_new < (1 - gamma_theta) * theta_k
+        )
+        
+        # Case 2: Small constraint violations and cost is decreasing
+        case2 = np.logical_and(
+            np.logical_and(
+                np.maximum(theta_new, theta_k) < theta_min,
+                slope < 0
+            ),
+            phi_new < phi_k + eta * alpha * slope
+        )
+        
+        # Case 3: Either cost or constraint violation is significantly reduced
+        case3 = np.logical_or(
+            phi_new < phi_k - gamma_phi * theta_k,
+            theta_new < (1 - gamma_theta) * theta_k
+        )
+        
+        # Accept if any case is satisfied
+        new_accepted = np.logical_or(np.logical_or(case1, case2), case3)
+        
+        return X_new, U_new, V_new, new_accepted
+    
+    # Run the backtracking loop
+    X, U, V,accepted = vmap(body)(alpha_values)
+    best_index = np.where(np.any(accepted), np.argmax(accepted), -1)
+    return X[best_index], U[best_index], V[best_index]
+
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,reference,parameter,x0, X, U):
     """Evaluates the costs and constraints based on the provided primal variables.
@@ -567,7 +672,7 @@ def mpc(
     #         merit_slope,
     #         armijo_factor=1e-4,
     #     )
-    X_new, U_new, V_new = filter_line_search(
+    X_new, U_new, V_new = parallel_filter_line_search(
     model_evaluator,
     X_in,
     U_in,
