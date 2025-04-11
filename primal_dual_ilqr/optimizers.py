@@ -154,8 +154,8 @@ def compute_search_direction(
     pad = lambda A: np.pad(A, [[0, 1], [0, 0]])
 
     if hessian_approx is None:
-        quadratizer = quadratize(lagrangian(cost, dynamics, x0), argnums=5)
-        Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1), pad(V[1:]), V)
+        quadratizer = quadratize(cost)
+        Q, R_pad, M_pad = quadratizer(X, pad(U), np.arange(T + 1))
     else:
         Q, R_pad, M_pad = jax.vmap(hessian_approx)(X, pad(U), np.arange(T + 1))
     
