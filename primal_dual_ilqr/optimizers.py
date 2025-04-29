@@ -579,7 +579,12 @@ def parallel_filter_line_search(
     # Run the backtracking loop
     X, U, V,accepted = vmap(body)(alpha_values)
     best_index = np.where(np.any(accepted), np.argmax(accepted), -1)
-    return X[best_index], U[best_index], V[best_index]
+
+    X_new = X[best_index]
+    U_new = U[best_index]
+    V_new = V[best_index]
+    
+    return X_new, U_new, V_new
 
 @partial(jit, static_argnums=(0, 1))
 def model_evaluator_helper(cost, dynamics,x0, X, U):
