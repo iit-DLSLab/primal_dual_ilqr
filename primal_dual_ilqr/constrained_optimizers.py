@@ -6,7 +6,7 @@ from functools import partial
 
 from trajax.optimizers import vectorize
 
-from primal_dual_ilqr.optimizers import primal_dual_ilqr
+from primal_dual_ilqr.primal_dual_ilqr.old_optimazers import primal_dual_ilqr
 
 
 @partial(
